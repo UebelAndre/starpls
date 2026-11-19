@@ -193,7 +193,7 @@ impl Checker {
         is_explicit: bool,
         extensions: &[&str],
     ) -> anyhow::Result<()> {
-        let canonical_path = PathBuf::from(&path).canonicalize()?;
+        let canonical_path = crate::single_thread::canonicalize(path)?;
         if self.interner.lookup_by_path_buf(&canonical_path).is_some() {
             return Ok(());
         }

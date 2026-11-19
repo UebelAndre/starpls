@@ -1,11 +1,20 @@
 use crossbeam_channel::Receiver;
 use crossbeam_channel::Sender;
+#[cfg(not(target_family = "wasm"))]
 use rayon::ThreadPool;
+#[cfg(not(target_family = "wasm"))]
 use rayon::ThreadPoolBuilder;
 
+/// Runs tasks and delivers their results through a channel.
+///
+/// With one or more threads this is a rayon thread pool. With zero threads
+/// (always the case on WebAssembly, where there are none) tasks run inline on
+/// the calling thread and their results are queued on the same channel, so
+/// the event loop drains them exactly as it would results from workers.
 pub(crate) struct TaskPool<T> {
     sender: Sender<T>,
-    inner: ThreadPool,
+    #[cfg(not(target_family = "wasm"))]
+    inner: Option<ThreadPool>,
 }
 
 impl<T> TaskPool<T> {
@@ -13,10 +22,18 @@ impl<T> TaskPool<T> {
         sender: Sender<T>,
         num_threads: usize,
     ) -> anyhow::Result<TaskPool<T>> {
-        let thread_pool = ThreadPoolBuilder::new().num_threads(num_threads).build()?;
+        #[cfg(not(target_family = "wasm"))]
+        let inner = if num_threads == 0 {
+            None
+        } else {
+            Some(ThreadPoolBuilder::new().num_threads(num_threads).build()?)
+        };
+        #[cfg(target_family = "wasm")]
+        let _ = num_threads;
         Ok(TaskPool {
             sender,
-            inner: thread_pool,
+            #[cfg(not(target_family = "wasm"))]
+            inner,
         })
     }
 
@@ -25,10 +42,13 @@ impl<T> TaskPool<T> {
         T: Send + 'static,
         F: FnOnce() -> T + Send + 'static,
     {
-        self.inner.spawn({
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(pool) = &self.inner {
             let sender = self.sender.clone();
-            move || sender.send(f()).unwrap()
-        })
+            pool.spawn(move || sender.send(f()).unwrap());
+            return;
+        }
+        self.sender.send(f()).unwrap();
     }
 
     #[allow(unused)]
@@ -37,10 +57,13 @@ impl<T> TaskPool<T> {
         T: Send + 'static,
         F: FnOnce(Sender<T>) + Send + 'static,
     {
-        self.inner.spawn({
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(pool) = &self.inner {
             let sender = self.sender.clone();
-            move || f(sender)
-        })
+            pool.spawn(move || f(sender));
+            return;
+        }
+        f(self.sender.clone());
     }
 }
 

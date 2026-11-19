@@ -1,5 +1,6 @@
 use clap::Args;
 use log::info;
+#[cfg(not(target_family = "wasm"))]
 use lsp_server::Connection;
 use lsp_types::CompletionOptions;
 use lsp_types::DeclarationCapability;
@@ -14,6 +15,7 @@ use crate::commands::InferenceOptions;
 use crate::event_loop;
 use crate::get_version;
 use crate::make_trigger_characters;
+use crate::single_thread::SingleThreadTransport;
 
 const COMPLETION_TRIGGER_CHARACTERS: &[char] = &['.', '"', '\'', '/', ':', '@'];
 const SIGNATURE_HELP_TRIGGER_CHARACTERS: &[char] = &['(', ',', ')'];
@@ -42,48 +44,73 @@ pub(crate) struct ServerCommand {
     #[clap(long = "analysis_debounce_interval", default_value_t = 250)]
     pub(crate) analysis_debounce_interval: u64,
 
+    /// Run the transport, the event loop and all request handling on one
+    /// thread, as the WebAssembly build always does. Useful for testing that
+    /// mode with the native binary.
+    #[clap(long = "single_threaded", default_value_t = false)]
+    pub(crate) single_threaded: bool,
+
     #[command(flatten)]
     pub(crate) inference_options: InferenceOptions,
 }
 
 impl ServerCommand {
-    pub(crate) fn run(self) -> anyhow::Result<()> {
-        info!("starpls, v{}", get_version());
-
-        // Create the transport over stdio.
-        let (connection, io_threads) = Connection::stdio();
-
-        // Initialize the connection with server capabilities. For now, this consists
-        // only of `TextDocumentSyncKind.Full`.
-        let server_capabilities = serde_json::to_value(ServerCapabilities {
-            completion_provider: Some(CompletionOptions {
-                trigger_characters: Some(make_trigger_characters(COMPLETION_TRIGGER_CHARACTERS)),
-                ..Default::default()
-            }),
-            declaration_provider: Some(DeclarationCapability::Simple(true)),
-            definition_provider: Some(OneOf::Left(true)),
-            document_symbol_provider: Some(OneOf::Left(true)),
-            hover_provider: Some(HoverProviderCapability::Simple(true)),
-            references_provider: Some(OneOf::Left(true)),
-            signature_help_provider: Some(SignatureHelpOptions {
-                trigger_characters: Some(make_trigger_characters(
-                    SIGNATURE_HELP_TRIGGER_CHARACTERS,
+    fn capabilities() -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::to_value::<ServerCapabilities>(
+            ServerCapabilities {
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(make_trigger_characters(
+                        COMPLETION_TRIGGER_CHARACTERS,
+                    )),
+                    ..Default::default()
+                }),
+                declaration_provider: Some(DeclarationCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                references_provider: Some(OneOf::Left(true)),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(make_trigger_characters(
+                        SIGNATURE_HELP_TRIGGER_CHARACTERS,
+                    )),
+                    ..Default::default()
+                }),
+                text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                    TextDocumentSyncKind::INCREMENTAL,
                 )),
                 ..Default::default()
-            }),
-            text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                TextDocumentSyncKind::INCREMENTAL,
-            )),
-            ..Default::default()
-        })?;
-        let initialize_params =
-            serde_json::from_value(connection.initialize(server_capabilities)?)?;
-        event_loop::process_connection(connection, self, initialize_params)?;
+            },
+        )?)
+    }
 
-        // Graceful shutdown.
-        info!("connection closed, exiting");
-        io_threads.join()?;
+    pub(crate) fn run(self) -> anyhow::Result<()> {
+        info!("starpls, v{}", get_version());
+        let server_capabilities = Self::capabilities()?;
 
+        if self.single_threaded || cfg!(target_family = "wasm") {
+            // One thread for everything; see `crate::single_thread`.
+            let (connection, transport) = SingleThreadTransport::new();
+            let params = transport.initialize(&connection, server_capabilities)?;
+            let initialize_params = serde_json::from_value(params)?;
+            event_loop::process_connection(connection, self, initialize_params, Some(transport))?;
+            info!("connection closed, exiting");
+            return Ok(());
+        }
+
+        #[cfg(not(target_family = "wasm"))]
+        {
+            // Create the transport over stdio.
+            let (connection, io_threads) = Connection::stdio();
+            let initialize_params =
+                serde_json::from_value(connection.initialize(server_capabilities)?)?;
+            event_loop::process_connection(connection, self, initialize_params, None)?;
+            // Graceful shutdown.
+            info!("connection closed, exiting");
+            io_threads.join()?;
+        }
+        #[cfg(target_family = "wasm")]
+        unreachable!("the wasm build always runs single-threaded");
+        #[allow(unreachable_code)]
         Ok(())
     }
 }
