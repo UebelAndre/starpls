@@ -16,6 +16,7 @@ mod extensions;
 mod handlers;
 mod host;
 mod server;
+mod single_thread;
 mod task_pool;
 mod utils;
 

@@ -448,7 +448,11 @@ impl FileLoader for DefaultFileLoader {
                 assert!(from_path.pop());
 
                 // Resolve the given path relative to the importing file's directory.
-                (from_path.join(path).canonicalize()?, None, None)
+                (
+                    crate::single_thread::canonicalize(&from_path.join(path))?,
+                    None,
+                    None,
+                )
             }
             Dialect::Bazel => {
                 // Parse the load path as a Bazel label.
@@ -511,7 +515,7 @@ impl FileLoader for DefaultFileLoader {
                     return Ok(None);
                 }
 
-                let path = path.canonicalize()?;
+                let path = crate::single_thread::canonicalize(&path)?;
                 let mut candidates = vec![];
                 let readdir = fs::read_dir(path)?;
 

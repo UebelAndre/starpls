@@ -16,6 +16,7 @@ use crate::handlers::notifications;
 use crate::handlers::requests;
 use crate::server::Server;
 use crate::server::ServerSnapshot;
+use crate::single_thread::SingleThreadTransport;
 
 #[macro_export]
 macro_rules! match_notification {
@@ -75,6 +76,7 @@ pub fn process_connection(
     connection: Connection,
     args: ServerCommand,
     initialize_params: InitializeParams,
+    transport: Option<SingleThreadTransport>,
 ) -> anyhow::Result<()> {
     debug!("initializing state and starting event loop");
     let config = ServerConfig {
@@ -83,10 +85,49 @@ pub fn process_connection(
         initialization_options: initialize_params.initialization_options,
     };
     let server = Server::new(connection, config)?;
-    server.run()
+    match transport {
+        Some(transport) => server.run_single_threaded(transport),
+        None => server.run(),
+    }
 }
 
 impl Server {
+    /// One message at a time: read, handle, run what it spawned, write.
+    fn run_single_threaded(mut self, transport: SingleThreadTransport) -> anyhow::Result<()> {
+        loop {
+            self.drain_tasks()?;
+            transport.flush()?;
+            let message = match transport.read()? {
+                Some(message) => message,
+                None => return Ok(()),
+            };
+            if let lsp_server::Message::Request(ref req) = message {
+                if req.method == "shutdown" {
+                    self.connection.sender.send(lsp_server::Message::Response(
+                        lsp_server::Response::new_ok(req.id.clone(), serde_json::Value::Null),
+                    ))?;
+                    transport.flush()?;
+                    // The client follows up with `exit`; either way we are done.
+                    let _ = transport.read();
+                    return Ok(());
+                }
+            }
+            self.handle_event(Event::Message(message))?;
+        }
+    }
+
+    /// Handles every task that is ready, including the ones handling produces,
+    /// until nothing is pending. Only meaningful when tasks run inline.
+    fn drain_tasks(&mut self) -> anyhow::Result<()> {
+        loop {
+            self.analysis_debouncer.pump();
+            match self.task_pool_handle.receiver.try_recv() {
+                Ok(task) => self.handle_event(Event::Task(task))?,
+                Err(_) => return Ok(()),
+            }
+        }
+    }
+
     fn run(mut self) -> anyhow::Result<()> {
         while let Some(event) = self.next_event() {
             if let Event::Message(lsp_server::Message::Request(ref req)) = event {

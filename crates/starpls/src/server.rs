@@ -73,7 +73,9 @@ impl Server {
     pub(crate) fn new(connection: Connection, config: ServerConfig) -> anyhow::Result<Self> {
         // Create the task pool for processing incoming requests.
         let (task_pool_sender, task_pool_receiver) = crossbeam_channel::unbounded();
-        let task_pool = TaskPool::with_num_threads(task_pool_sender.clone(), 4)?;
+        let inline = config.args.single_threaded || cfg!(target_family = "wasm");
+        let task_pool =
+            TaskPool::with_num_threads(task_pool_sender.clone(), if inline { 0 } else { 4 })?;
         let task_pool_handle = TaskPoolHandle::new(task_pool_receiver, task_pool);
 
         // Check if the user specified a path to the Bazel executable.
@@ -189,6 +191,7 @@ impl Server {
             analysis_debouncer: AnalysisDebouncer::new(
                 Duration::from_millis(analysis_debounce_interval),
                 task_pool_sender,
+                inline,
             ),
             analysis_requested_for_files: None,
             bazel_client,
