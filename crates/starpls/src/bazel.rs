@@ -1,5 +1,6 @@
 use anyhow::anyhow;
 use log::debug;
+use log::error;
 use log::info;
 use starpls_bazel::client::BazelClient;
 use starpls_bazel::client::BazelInfo;
@@ -54,8 +55,18 @@ impl BazelContext {
         }
 
         debug!("fetching builtin rules via `bazel info build-language`");
-        let rules = load_bazel_build_language(client)
-            .map_err(|err| anyhow!("failed to run `bazel info build-language`: {}", err))?;
+        // Native rules come from `bazel info build-language`. Without them the
+        // server still works for everything defined in Starlark.
+        let rules = match load_bazel_build_language(client) {
+            Ok(rules) => rules,
+            Err(err) => {
+                error!(
+                    "failed to run `bazel info build-language`: {}; native rules will be unknown",
+                    err
+                );
+                Default::default()
+            }
+        };
 
         Ok(BazelContext {
             info,
