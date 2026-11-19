@@ -38,6 +38,9 @@ crate = use_extension(
 crate.from_cargo(
     name = "crates",
     cargo_lockfile = "Cargo.lock",
+    # Required for starpls to be usable as a Bazel dependency: crate_universe
+    # cannot repin across module boundaries.
+    lockfile = "Cargo.Bazel.lock",
     manifests = [
         "//:Cargo.toml",
     ],
