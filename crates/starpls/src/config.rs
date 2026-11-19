@@ -6,6 +6,8 @@ use crate::commands::server::ServerCommand;
 pub(crate) struct ServerConfig {
     pub(crate) args: ServerCommand,
     pub(crate) caps: ClientCapabilities,
+    /// `initializationOptions` as sent by the client, see `crate::host`.
+    pub(crate) initialization_options: Option<serde_json::Value>,
 }
 
 macro_rules! try_or_default {
