@@ -1,5 +1,6 @@
 load("@rules_rust//rust:defs.bzl", "rust_library_group")
 load("@rules_rust_prost//:defs.bzl", "rust_prost_toolchain")
+load(":wasm_binary.bzl", "wasm_binary")
 
 exports_files(["rustfmt.toml"])
 
@@ -25,4 +26,22 @@ toolchain(
     name = "prost_toolchain",
     toolchain = "prost_toolchain_impl",
     toolchain_type = "@rules_rust_prost//:toolchain_type",
+)
+
+# The server for WebAssembly hosts (WASI preview 1), e.g. the VS Code
+# WebAssembly runtime. `bazel build //:starpls_wasm` builds it without
+# `--platforms`; the binary runs single-threaded, see crates/starpls/src/single_thread.rs.
+platform(
+    name = "wasm32-wasip1",
+    constraint_values = [
+        "@platforms//cpu:wasm32",
+        "@platforms//os:wasi",
+    ],
+)
+
+wasm_binary(
+    name = "starpls_wasm",
+    binary = "//crates/starpls",
+    platform = ":wasm32-wasip1",
+    visibility = ["//visibility:public"],
 )
