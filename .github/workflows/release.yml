@@ -41,6 +41,25 @@ jobs:
           path: bazel-bin/crates/starpls/starpls
           if-no-files-found: error
 
+  build-wasm:
+    name: Build (WebAssembly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@4f1f4aec02e41874fa0262ea8ff5172d7978ad1e
+      - name: Prepare for build
+        run: |
+          bazel/setup-ci.sh
+          tag=${{ github.ref_name }}
+          version=${tag:1}
+          awk -v ver="$version" '{ sub(/^version = .*/, "version = \"" ver "\"") }; 1' crates/starpls/Cargo.toml > output.toml && mv output.toml crates/starpls/Cargo.toml
+      - name: Build
+        run: bazel build -c opt //:starpls_wasm
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: starpls-wasm32-wasip1
+          path: bazel-bin/crates/starpls/starpls.wasm
+          if-no-files-found: error
+
   build-windows:
     name: Build (Windows)
     runs-on: windows-latest
@@ -71,7 +90,7 @@ jobs:
 
   release:
     name: Release
-    needs: [build, build-windows]
+    needs: [build, build-windows, build-wasm]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -88,6 +107,7 @@ jobs:
           mv artifacts/starpls-linux-amd64/starpls release/starpls-linux-amd64
           mv artifacts/starpls-darwin-arm64/starpls release/starpls-darwin-arm64
           mv artifacts/starpls-windows-amd64/starpls.exe release/starpls-windows-amd64.exe
+          mv artifacts/starpls-wasm32-wasip1/starpls.wasm release/starpls-wasm32-wasip1.wasm
           chmod +x release/starpls-*
 
           # Also create archives for usage by installation methods like Homebrew.
