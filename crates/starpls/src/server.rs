@@ -90,7 +90,22 @@ impl Server {
 
         // Determine Bazel configuration.
         let mut has_bazel_init_err = false;
-        let bazel_client = Arc::new(BazelCLI::new(&bazel_path));
+        let bazel_client: Arc<dyn BazelClient> = match config
+            .initialization_options
+            .as_ref()
+            .and_then(crate::host::bazel_client_from_options)
+        {
+            Some(Ok(client)) => {
+                info!("using the Bazel information provided by the client");
+                Arc::new(client)
+            }
+            Some(Err(err)) => {
+                error!("ignoring the client's Bazel information: {:#}", err);
+                has_bazel_init_err = true;
+                Arc::new(BazelCLI::new(&bazel_path))
+            }
+            None => Arc::new(BazelCLI::new(&bazel_path)),
+        };
         let bazel_cx = match BazelContext::new(&*bazel_client) {
             Ok(cx) => cx,
             Err(err) => {

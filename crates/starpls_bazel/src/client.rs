@@ -11,7 +11,7 @@ use serde_json::Deserializer;
 
 const DEFAULT_WORKSPACE_NAMES: &[&str] = &["__main__", "_main"];
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct BazelInfo {
     pub output_base: PathBuf,
     pub release: String,
@@ -203,5 +203,93 @@ impl Default for BazelCLI {
             executable: "bazel".into(),
             repo_mappings: Default::default(),
         }
+    }
+}
+
+/// A client that answers from information the editor supplied up front instead
+/// of running Bazel. This is how the server works when it cannot spawn
+/// processes, for example when compiled to WebAssembly: the host runs
+/// `bazel info`, `bazel info build-language` and `bazel mod dump_repo_mapping`
+/// and passes the results through `initializationOptions`.
+///
+/// Anything that would need a new Bazel invocation (fetching a repository,
+/// querying targets) reports an error instead.
+#[derive(Default)]
+pub struct StaticBazelClient {
+    info: BazelInfo,
+    build_language: Option<Vec<u8>>,
+    repo_mappings: HashMap<String, HashMap<String, String>>,
+    workspace_targets: Vec<String>,
+}
+
+impl StaticBazelClient {
+    pub fn new(
+        info: BazelInfo,
+        build_language: Option<Vec<u8>>,
+        repo_mappings: HashMap<String, HashMap<String, String>>,
+        workspace_targets: Vec<String>,
+    ) -> Self {
+        Self {
+            info,
+            build_language,
+            repo_mappings,
+            workspace_targets,
+        }
+    }
+}
+
+impl BazelClient for StaticBazelClient {
+    fn build_language(&self) -> anyhow::Result<Vec<u8>> {
+        self.build_language
+            .clone()
+            .ok_or_else(|| anyhow!("the host did not provide `bazel info build-language` output"))
+    }
+
+    fn info(&self) -> anyhow::Result<BazelInfo> {
+        Ok(self.info.clone())
+    }
+
+    fn resolve_repo_from_mapping(
+        &self,
+        apparent_repo: &str,
+        from_repo: &str,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .repo_mappings
+            .get(from_repo)
+            .and_then(|mapping| mapping.get(apparent_repo))
+            .cloned())
+    }
+
+    fn clear_repo_mappings(&self) {}
+
+    fn null_query_external_repo_targets(&self, repo: &str) -> anyhow::Result<()> {
+        bail!(
+            "cannot fetch `@@{}`: the host did not provide Bazel access",
+            repo
+        )
+    }
+
+    fn repo_mapping_keys(&self, from_repo: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .repo_mappings
+            .get(from_repo)
+            .map(|mapping| mapping.keys().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    fn query_all_workspace_targets(&self) -> anyhow::Result<Vec<String>> {
+        Ok(self.workspace_targets.clone())
+    }
+
+    fn fetch_repo(&self, repo: &str) -> anyhow::Result<()> {
+        bail!(
+            "cannot fetch `@@{}`: the host did not provide Bazel access",
+            repo
+        )
+    }
+
+    fn dump_repo_mapping(&self, repo: &str) -> anyhow::Result<HashMap<String, String>> {
+        Ok(self.repo_mappings.get(repo).cloned().unwrap_or_default())
     }
 }
