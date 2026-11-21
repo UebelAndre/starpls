@@ -63,6 +63,7 @@ pub(crate) fn did_save_text_document(
         }
         server.bazel_client.clear_repo_mappings();
         server.fetched_repos.clear();
+        server.host_unavailable.clear();
     }
     Ok(())
 }

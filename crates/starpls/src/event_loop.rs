@@ -4,6 +4,8 @@ use lsp_server::Connection;
 use lsp_types::InitializeParams;
 use lsp_types::WorkDoneProgressCreateParams;
 use rustc_hash::FxHashSet;
+use starpls_bazel::client::take_missing_host_data;
+use starpls_bazel::client::HostData;
 use starpls_common::FileId;
 
 use crate::commands::server::ServerCommand;
@@ -64,6 +66,16 @@ pub(crate) enum Task {
     FetchExternalRepoRequest(FetchExternalRepoRequest),
     /// Events from refreshing targets for the current workspace.
     RefreshAllWorkspaceTargets(RefreshAllWorkspaceTargetsProgress),
+    /// A request handler finished. `missing` is the Bazel data it asked the
+    /// static client for and did not get; the server may hold the response
+    /// until the client has supplied it (see `Server::park_request`).
+    RequestDone {
+        req: lsp_server::Request,
+        response: lsp_server::Response,
+        missing: Vec<HostData>,
+    },
+    /// Background analysis found Bazel data missing; ask the client for it.
+    HostDataNeeded(Vec<HostData>),
 }
 
 #[derive(Debug)]
@@ -172,6 +184,7 @@ impl Server {
         if !self.pending_repos.is_empty() && !self.is_fetching_repos {
             self.fetch_bazel_external_repos();
         }
+        self.expire_parked_requests();
 
         // Update our diagnostics if a triggering event (e.g. document open/close/change) occured.
         // This is done asynchronously, so any new diagnostics resulting from this won't be seen until the next turn
@@ -228,7 +241,8 @@ impl Server {
 
     fn update_diagnostics(&mut self, file_ids: Vec<FileId>) {
         let snapshot = self.snapshot();
-        self.task_pool_handle.spawn(move || {
+        self.task_pool_handle.spawn_with_sender(move |sender| {
+            let _ = take_missing_host_data();
             let mut res = Vec::new();
 
             // Query the database for diagnostics for each file and convert them to an LSP-compatible format.
@@ -240,7 +254,12 @@ impl Server {
                 res.push((file_id, diagnostics));
             }
 
-            Task::DiagnosticsReady(res)
+            // Diagnostics are republished once the data arrives.
+            let missing = take_missing_host_data();
+            if !missing.is_empty() {
+                sender.send(Task::HostDataNeeded(missing)).unwrap();
+            }
+            sender.send(Task::DiagnosticsReady(res)).unwrap();
         });
     }
 
@@ -288,6 +307,16 @@ impl Server {
                 self.respond(resp);
             }
             Task::Retry(req) => self.handle_request(req),
+            Task::RequestDone {
+                req,
+                response,
+                missing,
+            } => self.park_request(req, response, missing),
+            Task::HostDataNeeded(missing) => {
+                for data in missing {
+                    self.request_host_data(data);
+                }
+            }
             Task::FetchExternalRepos(progress) => {
                 let token = "FetchExternalRepos".to_string();
                 let work_done = match progress {
@@ -387,7 +416,8 @@ impl Server {
         }
     }
 
-    fn respond(&mut self, resp: lsp_server::Response) {
+    pub(crate) fn respond(&mut self, resp: lsp_server::Response) {
+        self.parked_once.remove(&resp.id);
         if self.req_queue.incoming.complete(resp.id.clone()).is_some() {
             self.connection.sender.send(resp.into()).unwrap();
         }

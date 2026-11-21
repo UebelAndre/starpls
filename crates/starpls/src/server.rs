@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::mem;
 use std::panic;
@@ -5,17 +6,26 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use log::debug;
 use log::error;
 use log::info;
+use log::warn;
 use lsp_server::Connection;
 use lsp_server::ReqQueue;
+use lsp_server::RequestId;
+use lsp_server::Response;
+use lsp_types::request::Request as _;
 use parking_lot::RwLock;
+use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
 use starpls_bazel::build_language::decode_rules;
+use starpls_bazel::client::take_missing_host_data;
 use starpls_bazel::client::BazelCLI;
 use starpls_bazel::client::BazelClient;
+use starpls_bazel::client::HostData;
+use starpls_bazel::client::StaticBazelClient;
 use starpls_bazel::decode_builtins;
 use starpls_bazel::APIContext;
 use starpls_bazel::Builtins;
@@ -38,6 +48,7 @@ use crate::document::PathInterner;
 use crate::event_loop::FetchExternalReposProgress;
 use crate::event_loop::RefreshAllWorkspaceTargetsProgress;
 use crate::event_loop::Task;
+use crate::extensions;
 use crate::task_pool::TaskPool;
 use crate::task_pool::TaskPoolHandle;
 
@@ -46,7 +57,7 @@ const BAZEL_INIT_ERR_MESSAGE: &str = "Failed to fetch Bazel configuration! Pleas
 pub(crate) struct Server {
     pub(crate) config: Arc<ServerConfig>,
     pub(crate) connection: Connection,
-    pub(crate) req_queue: ReqQueue<(), ()>,
+    pub(crate) req_queue: ReqQueue<(), OutgoingRequest>,
     pub(crate) task_pool_handle: TaskPoolHandle<Task>,
     pub(crate) document_manager: Arc<RwLock<DocumentManager>>,
     pub(crate) diagnostics_manager: DiagnosticsManager,
@@ -61,7 +72,45 @@ pub(crate) struct Server {
     pub(crate) is_fetching_repos: bool,
     pub(crate) is_refreshing_all_workspace_targets: bool,
     pub(crate) bzlmod_enabled: bool,
+    /// The client-supplied Bazel data, when that is where Bazel data comes from.
+    pub(crate) host_client: Option<Arc<StaticBazelClient>>,
+    /// Host data requested from the client and not answered yet.
+    pub(crate) host_in_flight: FxHashMap<HostData, RequestId>,
+    /// Host data the client said it cannot provide; not asked for again
+    /// until the module file changes.
+    pub(crate) host_unavailable: FxHashSet<HostData>,
+    /// Requests waiting for host data before they run again.
+    pub(crate) parked: Vec<ParkedRequest>,
+    /// Requests that have waited once already; a second time they answer
+    /// with what they have.
+    pub(crate) parked_once: FxHashSet<RequestId>,
+    /// A repository fetch delegated to the client, until every repository
+    /// has been answered.
+    pub(crate) host_fetch: Option<HostFetch>,
 }
+
+/// What an outgoing request was for, to act on its response.
+pub(crate) enum OutgoingRequest {
+    Plain,
+    Host(HostData),
+}
+
+pub(crate) struct ParkedRequest {
+    req: lsp_server::Request,
+    response: Response,
+    waiting_on: Vec<HostData>,
+    since: Instant,
+}
+
+pub(crate) struct HostFetch {
+    remaining: FxHashSet<String>,
+    files: FxHashSet<FileId>,
+    failed: Vec<String>,
+}
+
+/// How long a request waits for host data before answering without it.
+/// In single-threaded mode this is checked when the next message arrives.
+pub(crate) const HOST_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) struct ServerSnapshot {
     pub(crate) config: Arc<ServerConfig>,
@@ -92,6 +141,7 @@ impl Server {
 
         // Determine Bazel configuration.
         let mut has_bazel_init_err = false;
+        let mut host_client: Option<Arc<StaticBazelClient>> = None;
         let bazel_client: Arc<dyn BazelClient> = match config
             .initialization_options
             .as_ref()
@@ -99,7 +149,9 @@ impl Server {
         {
             Some(Ok(client)) => {
                 info!("using the Bazel information provided by the client");
-                Arc::new(client)
+                let client = Arc::new(client);
+                host_client = Some(client.clone());
+                client
             }
             Some(Err(err)) => {
                 error!("ignoring the client's Bazel information: {:#}", err);
@@ -177,7 +229,7 @@ impl Server {
         }
 
         let analysis_debounce_interval = config.args.analysis_debounce_interval;
-        let server = Server {
+        let mut server = Server {
             config: Arc::new(config),
             connection,
             req_queue: Default::default(),
@@ -202,10 +254,22 @@ impl Server {
             is_fetching_repos: false,
             is_refreshing_all_workspace_targets: false,
             bzlmod_enabled: bazel_cx.bzlmod_enabled,
+            host_client,
+            host_in_flight: Default::default(),
+            host_unavailable: Default::default(),
+            parked: Vec::new(),
+            parked_once: Default::default(),
+            host_fetch: None,
         };
 
         if has_bazel_init_err {
             server.send_error_message(BAZEL_INIT_ERR_MESSAGE);
+        }
+        // Whatever the Bazel context could not get from the client up front
+        // (typically the main repository mapping and the native rules) is
+        // asked for now, in the background.
+        for data in take_missing_host_data() {
+            server.request_host_data(data);
         }
 
         Ok(server)
@@ -273,15 +337,218 @@ impl Server {
     }
 
     pub(crate) fn send_request<R: lsp_types::request::Request>(&mut self, params: R::Params) {
-        let req = self
-            .req_queue
-            .outgoing
-            .register(R::METHOD.to_string(), params, ());
+        let req =
+            self.req_queue
+                .outgoing
+                .register(R::METHOD.to_string(), params, OutgoingRequest::Plain);
         self.send(req.into());
     }
 
     pub(crate) fn complete_request(&mut self, resp: lsp_server::Response) {
-        self.req_queue.outgoing.complete(resp.id);
+        if let Some(OutgoingRequest::Host(data)) = self.req_queue.outgoing.complete(resp.id.clone())
+        {
+            self.on_host_response(data, resp);
+        }
+    }
+
+    /// Asks the client for Bazel data the static client does not have, unless
+    /// it is already on its way or the client said it cannot provide it.
+    pub(crate) fn request_host_data(&mut self, data: HostData) {
+        if !self
+            .host_client
+            .as_ref()
+            .is_some_and(|host| host.client_requests())
+        {
+            return;
+        }
+        if self.host_unavailable.contains(&data) || self.host_in_flight.contains_key(&data) {
+            return;
+        }
+        debug!("asking the client for {:?}", data);
+        let req = match &data {
+            HostData::RepoMapping(repo) => self.req_queue.outgoing.register(
+                extensions::BazelRepoMapping::METHOD.to_string(),
+                extensions::BazelRepoMappingParams { repo: repo.clone() },
+                OutgoingRequest::Host(data.clone()),
+            ),
+            HostData::BuildLanguage => self.req_queue.outgoing.register(
+                extensions::BazelBuildLanguage::METHOD.to_string(),
+                extensions::BazelBuildLanguageParams {},
+                OutgoingRequest::Host(data.clone()),
+            ),
+            HostData::FetchRepo(repo) => self.req_queue.outgoing.register(
+                extensions::BazelFetchRepo::METHOD.to_string(),
+                extensions::BazelFetchRepoParams { repo: repo.clone() },
+                OutgoingRequest::Host(data.clone()),
+            ),
+        };
+        self.host_in_flight.insert(data, req.id.clone());
+        self.send(req.into());
+    }
+
+    /// Answers a finished request, or holds it when Bazel data it may depend
+    /// on is still to come from the client: data its handler found missing,
+    /// or a repository mapping or the native rules requested earlier and not
+    /// answered yet (a load resolution cached before they arrive is stale).
+    /// A held request runs again when the data arrives. It waits at most once
+    /// and at most `HOST_REQUEST_TIMEOUT`; after that it is answered with what
+    /// the handler produced.
+    pub(crate) fn park_request(
+        &mut self,
+        req: lsp_server::Request,
+        response: Response,
+        missing: Vec<HostData>,
+    ) {
+        let mut missing: Vec<HostData> = missing
+            .into_iter()
+            .filter(|data| !self.host_unavailable.contains(data))
+            .collect();
+        if missing.is_empty() {
+            // Only the data every request may depend on holds unrelated
+            // requests: the main repository's mapping and the native rules.
+            // A request that needs another repository's mapping says so
+            // itself through `missing`.
+            missing.extend(
+                self.host_in_flight
+                    .keys()
+                    .filter(|data| {
+                        matches!(data, HostData::BuildLanguage)
+                            || matches!(data, HostData::RepoMapping(repo) if repo.is_empty())
+                    })
+                    .cloned(),
+            );
+        }
+        let can_wait = self
+            .host_client
+            .as_ref()
+            .is_some_and(|host| host.client_requests())
+            && !missing.is_empty()
+            && self.parked_once.insert(req.id.clone());
+        if !can_wait {
+            self.respond(response);
+            return;
+        }
+        debug!("request {} waits for {:?}", req.id, missing);
+        for data in &missing {
+            self.request_host_data(data.clone());
+        }
+        self.parked.push(ParkedRequest {
+            req,
+            response,
+            waiting_on: missing,
+            since: Instant::now(),
+        });
+    }
+
+    /// Answers parked requests whose data has not arrived in time.
+    pub(crate) fn expire_parked_requests(&mut self) {
+        if self.parked.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let (expired, waiting): (Vec<_>, Vec<_>) = mem::take(&mut self.parked)
+            .into_iter()
+            .partition(|parked| now.duration_since(parked.since) >= HOST_REQUEST_TIMEOUT);
+        self.parked = waiting;
+        for parked in expired {
+            warn!(
+                "answering request {} without {:?}: the client did not provide it within {:?}",
+                parked.req.id, parked.waiting_on, HOST_REQUEST_TIMEOUT
+            );
+            self.respond(parked.response);
+        }
+    }
+
+    /// Stores host data the client answered with, refreshes what depended on
+    /// it, and re-runs the requests that were waiting.
+    fn on_host_response(&mut self, data: HostData, resp: Response) {
+        self.host_in_flight.remove(&data);
+        let host = match &self.host_client {
+            Some(host) => host.clone(),
+            None => return,
+        };
+        let result = resp.result.unwrap_or(serde_json::Value::Null);
+        let mut available = true;
+        match &data {
+            HostData::RepoMapping(repo) => {
+                match serde_json::from_value::<Option<HashMap<String, String>>>(result) {
+                    Ok(Some(mapping)) => {
+                        info!(
+                            "received the repository mapping of \"{}\" ({} entries)",
+                            repo,
+                            mapping.len()
+                        );
+                        host.set_repo_mapping(repo, mapping);
+                    }
+                    _ => available = false,
+                }
+            }
+            HostData::BuildLanguage => match serde_json::from_value::<Option<String>>(result) {
+                Ok(Some(path)) => match fs::read(&path) {
+                    Ok(bytes) => {
+                        host.set_build_language(bytes);
+                        match load_bazel_build_language(&*host) {
+                            Ok(rules) => {
+                                info!("received the native rules from {}", path);
+                                self.analysis.set_builtin_defs(load_bazel_builtins(), rules);
+                            }
+                            Err(err) => {
+                                error!("failed to decode the native rules from {}: {}", path, err);
+                                available = false;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        error!("failed to read the native rules from {}: {}", path, err);
+                        available = false;
+                    }
+                },
+                _ => available = false,
+            },
+            HostData::FetchRepo(repo) => {
+                let ok = matches!(serde_json::from_value::<bool>(result), Ok(true));
+                if !ok {
+                    available = false;
+                }
+                if let Some(fetch) = &mut self.host_fetch {
+                    fetch.remaining.remove(repo);
+                    if !ok {
+                        fetch.failed.push(repo.clone());
+                    }
+                    if fetch.remaining.is_empty() {
+                        let fetch = self.host_fetch.take().unwrap();
+                        self.task_pool_handle.spawn(move || {
+                            Task::FetchExternalRepos(FetchExternalReposProgress::End(
+                                fetch.files,
+                                fetch.failed,
+                            ))
+                        });
+                    }
+                }
+            }
+        }
+        if !available {
+            warn!("the client could not provide {:?}", data);
+            self.host_unavailable.insert(data.clone());
+        }
+        // Load resolutions cached during inference may now be wrong either
+        // way; an empty change resets that cache, and the open documents are
+        // re-analysed so their diagnostics follow.
+        self.analysis.apply_change(Change::default());
+        let open = self.document_manager.read().editor_file_ids();
+        self.force_analysis_for_files.extend(open);
+        let (ready, waiting): (Vec<_>, Vec<_>) = mem::take(&mut self.parked)
+            .into_iter()
+            .partition(|parked| parked.waiting_on.contains(&data));
+        self.parked = waiting;
+        for parked in ready {
+            if available {
+                let req = parked.req;
+                self.task_pool_handle.spawn(move || Task::Retry(req));
+            } else {
+                self.respond(parked.response);
+            }
+        }
     }
 
     pub(crate) fn send_notification<N: lsp_types::notification::Notification>(
@@ -306,6 +573,14 @@ impl Server {
     }
 
     pub(crate) fn fetch_bazel_external_repos(&mut self) {
+        if self
+            .host_client
+            .as_ref()
+            .is_some_and(|host| host.client_requests())
+        {
+            self.fetch_external_repos_through_client();
+            return;
+        }
         let repos = mem::take(&mut self.pending_repos);
         let files = mem::take(&mut self.pending_files);
         let bazel_client = self.bazel_client.clone();
@@ -344,6 +619,42 @@ impl Server {
                 )))
                 .unwrap();
         });
+    }
+
+    /// The fetch flow when the client runs Bazel: one `starpls/bazel/fetchRepo`
+    /// request per repository, the usual progress and refresh around them.
+    fn fetch_external_repos_through_client(&mut self) {
+        let repos = mem::take(&mut self.pending_repos);
+        let files = mem::take(&mut self.pending_files);
+        self.is_fetching_repos = true;
+        self.fetched_repos.extend(repos.clone());
+        let begin = repos.clone();
+        self.task_pool_handle
+            .spawn(move || Task::FetchExternalRepos(FetchExternalReposProgress::Begin(begin)));
+        let mut fetch = HostFetch {
+            remaining: FxHashSet::default(),
+            files,
+            failed: Vec::new(),
+        };
+        for repo in repos {
+            self.request_host_data(HostData::FetchRepo(repo.clone()));
+            if self
+                .host_in_flight
+                .contains_key(&HostData::FetchRepo(repo.clone()))
+            {
+                fetch.remaining.insert(repo);
+            } else {
+                // Not asked: the client already said it cannot fetch it.
+                fetch.failed.push(repo);
+            }
+        }
+        if fetch.remaining.is_empty() {
+            self.task_pool_handle.spawn(move || {
+                Task::FetchExternalRepos(FetchExternalReposProgress::End(fetch.files, fetch.failed))
+            });
+        } else {
+            self.host_fetch = Some(fetch);
+        }
     }
 
     pub(crate) fn refresh_all_workspace_targets(&mut self) {

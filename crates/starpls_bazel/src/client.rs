@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -206,20 +207,54 @@ impl Default for BazelCLI {
     }
 }
 
-/// A client that answers from information the editor supplied up front instead
-/// of running Bazel. This is how the server works when it cannot spawn
+/// Bazel data the server can ask the client for, when the client supports
+/// the `starpls/bazel/*` requests (see `initializationOptions.bazel.requests`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum HostData {
+    /// The repository mapping of a canonical repository (`""` for the main one).
+    RepoMapping(String),
+    /// The output of `bazel info build-language`.
+    BuildLanguage,
+    /// A fetch of a canonical repository that is not in the output base.
+    FetchRepo(String),
+}
+
+thread_local! {
+    static MISSING_HOST_DATA: RefCell<Vec<HostData>> = const { RefCell::new(Vec::new()) };
+}
+
+fn note_missing(data: HostData) {
+    MISSING_HOST_DATA.with(|missing| {
+        let mut missing = missing.borrow_mut();
+        if !missing.contains(&data) {
+            missing.push(data);
+        }
+    });
+}
+
+/// Returns the host data the static client found missing on this thread
+/// since the last call. Request handlers call this after running, so that
+/// the request can wait for the data instead of answering without it.
+pub fn take_missing_host_data() -> Vec<HostData> {
+    MISSING_HOST_DATA.with(|missing| std::mem::take(&mut *missing.borrow_mut()))
+}
+
+/// A client that answers from information the editor supplied instead of
+/// running Bazel. This is how the server works when it cannot spawn
 /// processes, for example when compiled to WebAssembly: the host runs
 /// `bazel info`, `bazel info build-language` and `bazel mod dump_repo_mapping`
-/// and passes the results through `initializationOptions`.
+/// and passes the results through `initializationOptions`, up front or, if
+/// it declared support for the `starpls/bazel/*` requests, when asked.
 ///
-/// Anything that would need a new Bazel invocation (fetching a repository,
-/// querying targets) reports an error instead.
-#[derive(Default)]
+/// Anything it was not given is recorded through `note_missing` so the
+/// server can ask the client for it; without client requests those
+/// operations report an error or an empty answer.
 pub struct StaticBazelClient {
     info: BazelInfo,
-    build_language: Option<Vec<u8>>,
-    repo_mappings: HashMap<String, HashMap<String, String>>,
+    build_language: RwLock<Option<Vec<u8>>>,
+    repo_mappings: RwLock<HashMap<String, HashMap<String, String>>>,
     workspace_targets: Vec<String>,
+    client_requests: bool,
 }
 
 impl StaticBazelClient {
@@ -231,18 +266,48 @@ impl StaticBazelClient {
     ) -> Self {
         Self {
             info,
-            build_language,
-            repo_mappings,
+            build_language: RwLock::new(build_language),
+            repo_mappings: RwLock::new(repo_mappings),
             workspace_targets,
+            client_requests: false,
+        }
+    }
+
+    /// Whether the client answers `starpls/bazel/*` requests for data it did
+    /// not supply up front.
+    pub fn with_client_requests(mut self, client_requests: bool) -> Self {
+        self.client_requests = client_requests;
+        self
+    }
+
+    pub fn client_requests(&self) -> bool {
+        self.client_requests
+    }
+
+    pub fn set_repo_mapping(&self, repo: &str, mapping: HashMap<String, String>) {
+        self.repo_mappings.write().insert(repo.to_string(), mapping);
+    }
+
+    pub fn set_build_language(&self, build_language: Vec<u8>) {
+        *self.build_language.write() = Some(build_language);
+    }
+
+    fn missing(&self, data: HostData) {
+        if self.client_requests {
+            note_missing(data);
         }
     }
 }
 
 impl BazelClient for StaticBazelClient {
     fn build_language(&self) -> anyhow::Result<Vec<u8>> {
-        self.build_language
-            .clone()
-            .ok_or_else(|| anyhow!("the host did not provide `bazel info build-language` output"))
+        match &*self.build_language.read() {
+            Some(bytes) => Ok(bytes.clone()),
+            None => {
+                self.missing(HostData::BuildLanguage);
+                bail!("no `bazel info build-language` data was supplied")
+            }
+        }
     }
 
     fn info(&self) -> anyhow::Result<BazelInfo> {
@@ -254,28 +319,37 @@ impl BazelClient for StaticBazelClient {
         apparent_repo: &str,
         from_repo: &str,
     ) -> anyhow::Result<Option<String>> {
-        Ok(self
-            .repo_mappings
-            .get(from_repo)
-            .and_then(|mapping| mapping.get(apparent_repo))
-            .cloned())
+        match self.repo_mappings.read().get(from_repo) {
+            Some(mapping) => Ok(mapping.get(apparent_repo).cloned()),
+            None => {
+                self.missing(HostData::RepoMapping(from_repo.to_string()));
+                Ok(None)
+            }
+        }
     }
 
-    fn clear_repo_mappings(&self) {}
+    fn clear_repo_mappings(&self) {
+        // Data supplied up front stays; data fetched on request is asked for again.
+        if self.client_requests {
+            self.repo_mappings.write().clear();
+        }
+    }
 
     fn null_query_external_repo_targets(&self, repo: &str) -> anyhow::Result<()> {
         bail!(
-            "cannot fetch `@@{}`: the host did not provide Bazel access",
+            "cannot fetch repository @{}: this server does not run Bazel",
             repo
         )
     }
 
     fn repo_mapping_keys(&self, from_repo: &str) -> anyhow::Result<Vec<String>> {
-        Ok(self
-            .repo_mappings
-            .get(from_repo)
-            .map(|mapping| mapping.keys().cloned().collect())
-            .unwrap_or_default())
+        match self.repo_mappings.read().get(from_repo) {
+            Some(mapping) => Ok(mapping.keys().cloned().collect()),
+            None => {
+                self.missing(HostData::RepoMapping(from_repo.to_string()));
+                Ok(Vec::new())
+            }
+        }
     }
 
     fn query_all_workspace_targets(&self) -> anyhow::Result<Vec<String>> {
@@ -284,12 +358,18 @@ impl BazelClient for StaticBazelClient {
 
     fn fetch_repo(&self, repo: &str) -> anyhow::Result<()> {
         bail!(
-            "cannot fetch `@@{}`: the host did not provide Bazel access",
+            "cannot fetch repository @{}: this server does not run Bazel",
             repo
         )
     }
 
     fn dump_repo_mapping(&self, repo: &str) -> anyhow::Result<HashMap<String, String>> {
-        Ok(self.repo_mappings.get(repo).cloned().unwrap_or_default())
+        match self.repo_mappings.read().get(repo) {
+            Some(mapping) => Ok(mapping.clone()),
+            None => {
+                self.missing(HostData::RepoMapping(repo.to_string()));
+                Ok(HashMap::new())
+            }
+        }
     }
 }

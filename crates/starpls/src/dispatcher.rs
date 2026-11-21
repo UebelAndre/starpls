@@ -1,5 +1,6 @@
 use std::panic;
 
+use starpls_bazel::client::take_missing_host_data;
 use starpls_ide::Cancelled;
 
 use crate::event_loop::Task;
@@ -33,7 +34,10 @@ impl<'a> RequestDispatcher<'a> {
         };
 
         let snapshot = self.server.snapshot();
+        let parked_req = req.clone();
         self.server.task_pool_handle.spawn(move || {
+            // Anything a cancelled run left behind on this thread is stale.
+            let _ = take_missing_host_data();
             let res = panic::catch_unwind(|| f(&snapshot, params));
             let response = match res {
                 Ok(res) => match res {
@@ -63,7 +67,13 @@ impl<'a> RequestDispatcher<'a> {
                 }
             };
 
-            Task::ResponseReady(response)
+            // The server decides whether to answer now or to wait for Bazel
+            // data from the client first (see `Server::park_request`).
+            Task::RequestDone {
+                req: parked_req,
+                response,
+                missing: take_missing_host_data(),
+            }
         });
 
         self
