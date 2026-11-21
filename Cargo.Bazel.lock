@@ -3,7 +3,7 @@
     "protoc-gen-prost 0.2.3",
     "protoc-gen-tonic 0.3.0"
   ],
-  "checksum": "6a58c569ef1ad9209761f4c0cc38fa9bc72b724f2a45c5e9bece05c158f09d7f",
+  "checksum": "8d758fd41a61322ad2aad4591a8370c8099d534d567601d3ec77388e25e509e4",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -75,6 +75,10 @@
       "x86_64-pc-windows-msvc",
       "x86_64-unknown-linux-gnu",
       "x86_64-unknown-nixos-gnu"
+    ],
+    "cfg(target_family = \"wasm\")": [
+      "wasm32-unknown-unknown",
+      "wasm32-wasip1"
     ],
     "cfg(target_os = \"hermit\")": [],
     "cfg(target_os = \"redox\")": [],
@@ -6922,7 +6926,7 @@
       ],
       "version": "1.2.0"
     },
-    "starpls 0.0.0": {
+    "starpls 0.1.22": {
       "common_attrs": {
         "deps": {
           "common": [
@@ -7001,6 +7005,18 @@
                 "id": "rayon 1.8.0",
                 "target": "rayon"
               }
+            ],
+            "cfg(target_family = \"wasm\")": [
+              {
+                "id": "wasi 0.11.0+wasi-snapshot-preview1",
+                "target": "wasi"
+              }
+            ],
+            "cfg(unix)": [
+              {
+                "id": "libc 0.2.152",
+                "target": "libc"
+              }
             ]
           }
         },
@@ -7009,7 +7025,7 @@
       "name": "starpls",
       "repository": null,
       "targets": [],
-      "version": "0.0.0"
+      "version": "0.1.22"
     },
     "starpls_bazel 0.1.0": {
       "build_script_attrs": {
@@ -10044,6 +10060,7 @@
     "hashbrown 0.14.3",
     "id-arena 2.2.1",
     "indexmap 2.1.0",
+    "libc 0.2.152",
     "line-index 0.1.1",
     "log 0.4.22",
     "lsp-server 0.7.5",
@@ -10062,7 +10079,8 @@
     "smol_str 0.2.0",
     "triomphe 0.1.11",
     "unindent 0.2.3",
-    "walkdir 2.5.0"
+    "walkdir 2.5.0",
+    "wasi 0.11.0+wasi-snapshot-preview1"
   ],
   "direct_dev_deps": [
     "expect-test 1.5.0",
@@ -10074,7 +10092,7 @@
   ],
   "workspace_members": {
     "runfiles 0.38.0": "vendor/runfiles",
-    "starpls 0.0.0": "crates/starpls",
+    "starpls 0.1.22": "crates/starpls",
     "starpls_bazel 0.1.0": "crates/starpls_bazel",
     "starpls_common 0.1.0": "crates/starpls_common",
     "starpls_hir 0.1.0": "crates/starpls_hir",

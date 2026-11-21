@@ -1,9 +1,14 @@
+use std::time::Duration;
+use std::time::Instant;
+
 use crossbeam_channel::select;
 use log::debug;
 use lsp_server::Connection;
 use lsp_types::InitializeParams;
 use lsp_types::WorkDoneProgressCreateParams;
 use rustc_hash::FxHashSet;
+use starpls_bazel::client::take_missing_host_data;
+use starpls_bazel::client::HostData;
 use starpls_common::FileId;
 
 use crate::commands::server::ServerCommand;
@@ -64,12 +69,27 @@ pub(crate) enum Task {
     FetchExternalRepoRequest(FetchExternalRepoRequest),
     /// Events from refreshing targets for the current workspace.
     RefreshAllWorkspaceTargets(RefreshAllWorkspaceTargetsProgress),
+    /// A request handler finished. `missing` is the Bazel data it asked the
+    /// static client for and did not get; the server may hold the response
+    /// until the client has supplied it (see `Server::park_request`).
+    RequestDone {
+        req: lsp_server::Request,
+        response: lsp_server::Response,
+        missing: Vec<HostData>,
+    },
+    /// Background analysis found Bazel data missing; ask the client for it.
+    HostDataNeeded(Vec<HostData>),
 }
+
+/// How long the single-threaded loop waits for `exit` after `shutdown`.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub(crate) enum Event {
     Message(lsp_server::Message),
     Task(Task),
+    /// A parked request is due to be answered without its data.
+    Tick,
 }
 
 pub fn process_connection(
@@ -93,22 +113,57 @@ pub fn process_connection(
 
 impl Server {
     /// One message at a time: read, handle, run what it spawned, write.
-    fn run_single_threaded(mut self, transport: SingleThreadTransport) -> anyhow::Result<()> {
+    fn run_single_threaded(mut self, mut transport: SingleThreadTransport) -> anyhow::Result<()> {
         loop {
             self.drain_tasks()?;
             transport.flush()?;
+            // Requests parked for data from the client are answered without it
+            // after `HOST_REQUEST_TIMEOUT`, so wait for input only that long
+            // while any are pending.
+            while let Some(deadline) = self.next_parked_deadline() {
+                let timeout = deadline.saturating_duration_since(Instant::now());
+                if transport.wait_readable(timeout)? {
+                    break;
+                }
+                self.expire_parked_requests();
+                self.drain_tasks()?;
+                transport.flush()?;
+            }
             let message = match transport.read()? {
                 Some(message) => message,
                 None => return Ok(()),
             };
+            if let lsp_server::Message::Notification(ref not) = message {
+                if not.method == "exit" {
+                    // `exit` without a preceding `shutdown`: leave, with an
+                    // error as the protocol asks.
+                    anyhow::bail!("`exit` received before `shutdown`");
+                }
+            }
             if let lsp_server::Message::Request(ref req) = message {
                 if req.method == "shutdown" {
                     self.connection.sender.send(lsp_server::Message::Response(
                         lsp_server::Response::new_ok(req.id.clone(), serde_json::Value::Null),
                     ))?;
                     transport.flush()?;
-                    // The client follows up with `exit`; either way we are done.
-                    let _ = transport.read();
+                    // The client follows up with `exit`. Wait for it, but not
+                    // forever: a client that went away instead is done too.
+                    match transport.wait_readable(SHUTDOWN_TIMEOUT) {
+                        Ok(true) => match transport.read() {
+                            Ok(Some(lsp_server::Message::Notification(not)))
+                                if not.method == "exit" => {}
+                            Ok(None) => log::debug!("connection closed after shutdown"),
+                            Ok(Some(other)) => {
+                                log::warn!("expected `exit` after shutdown, got {:?}", other)
+                            }
+                            Err(err) => log::warn!("reading `exit` after shutdown: {}", err),
+                        },
+                        Ok(false) => log::warn!(
+                            "no `exit` within {:?} of shutdown, exiting anyway",
+                            SHUTDOWN_TIMEOUT
+                        ),
+                        Err(err) => log::warn!("waiting for `exit` after shutdown: {}", err),
+                    }
                     return Ok(());
                 }
             }
@@ -142,9 +197,16 @@ impl Server {
     }
 
     fn next_event(&self) -> Option<Event> {
+        // Wake up when the oldest parked request is due, so its fallback
+        // answer does not wait for the next message.
+        let deadline = match self.next_parked_deadline() {
+            Some(deadline) => crossbeam_channel::at(deadline),
+            None => crossbeam_channel::never(),
+        };
         let event = select! {
             recv(self.connection.receiver) -> req => req.ok().map(Event::Message),
             recv(self.task_pool_handle.receiver) -> task => Some(Event::Task(task.unwrap())),
+            recv(deadline) -> _ => Some(Event::Tick),
         };
         event
     }
@@ -167,11 +229,13 @@ impl Server {
                     self.handle_task(task);
                 }
             }
+            Event::Tick => self.expire_parked_requests(),
         };
 
         if !self.pending_repos.is_empty() && !self.is_fetching_repos {
             self.fetch_bazel_external_repos();
         }
+        self.expire_parked_requests();
 
         // Update our diagnostics if a triggering event (e.g. document open/close/change) occured.
         // This is done asynchronously, so any new diagnostics resulting from this won't be seen until the next turn
@@ -228,7 +292,8 @@ impl Server {
 
     fn update_diagnostics(&mut self, file_ids: Vec<FileId>) {
         let snapshot = self.snapshot();
-        self.task_pool_handle.spawn(move || {
+        self.task_pool_handle.spawn_with_sender(move |sender| {
+            let _ = take_missing_host_data();
             let mut res = Vec::new();
 
             // Query the database for diagnostics for each file and convert them to an LSP-compatible format.
@@ -240,7 +305,12 @@ impl Server {
                 res.push((file_id, diagnostics));
             }
 
-            Task::DiagnosticsReady(res)
+            // Diagnostics are republished once the data arrives.
+            let missing = take_missing_host_data();
+            if !missing.is_empty() {
+                sender.send(Task::HostDataNeeded(missing)).unwrap();
+            }
+            sender.send(Task::DiagnosticsReady(res)).unwrap();
         });
     }
 
@@ -288,6 +358,16 @@ impl Server {
                 self.respond(resp);
             }
             Task::Retry(req) => self.handle_request(req),
+            Task::RequestDone {
+                req,
+                response,
+                missing,
+            } => self.park_request(req, response, missing),
+            Task::HostDataNeeded(missing) => {
+                for data in missing {
+                    self.request_host_data(data);
+                }
+            }
             Task::FetchExternalRepos(progress) => {
                 let token = "FetchExternalRepos".to_string();
                 let work_done = match progress {
@@ -319,6 +399,13 @@ impl Server {
                     FetchExternalReposProgress::End(files, failed_repos) => {
                         self.is_fetching_repos = false;
                         self.force_analysis_for_files.extend(files);
+                        // A repository that failed to fetch may be asked for
+                        // again later (after the host cooldown, if the client
+                        // was the one that could not); only successes count
+                        // as fetched.
+                        for repo in &failed_repos {
+                            self.fetched_repos.remove(repo);
+                        }
 
                         // Fetching external repositories with `bazel query`, as in the case when bzlmod is disabled, often
                         // results in a non-zero exit code because of errors that we don't really care about. Therefore, to
@@ -387,7 +474,8 @@ impl Server {
         }
     }
 
-    fn respond(&mut self, resp: lsp_server::Response) {
+    pub(crate) fn respond(&mut self, resp: lsp_server::Response) {
+        self.parked_once.remove(&resp.id);
         if self.req_queue.incoming.complete(resp.id.clone()).is_some() {
             self.connection.sender.send(resp.into()).unwrap();
         }

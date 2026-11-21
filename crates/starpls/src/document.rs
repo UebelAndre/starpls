@@ -152,6 +152,15 @@ impl DocumentManager {
         (has_opened_or_closed_documents, changed_documents)
     }
 
+    /// The files currently open in the editor.
+    pub(crate) fn editor_file_ids(&self) -> Vec<FileId> {
+        self.documents
+            .iter()
+            .filter(|(_, document)| matches!(document.source, DocumentSource::Editor(_)))
+            .map(|(file_id, _)| *file_id)
+            .collect()
+    }
+
     pub(crate) fn get(&self, file_id: FileId) -> Option<&Document> {
         self.documents.get(&file_id)
     }

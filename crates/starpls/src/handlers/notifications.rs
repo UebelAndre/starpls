@@ -61,8 +61,7 @@ pub(crate) fn did_save_text_document(
             }
             _ => return Ok(()),
         }
-        server.bazel_client.clear_repo_mappings();
-        server.fetched_repos.clear();
+        server.invalidate_host_data();
     }
     Ok(())
 }

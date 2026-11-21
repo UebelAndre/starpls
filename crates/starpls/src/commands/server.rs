@@ -89,7 +89,7 @@ impl ServerCommand {
 
         if self.single_threaded || cfg!(target_family = "wasm") {
             // One thread for everything; see `crate::single_thread`.
-            let (connection, transport) = SingleThreadTransport::new();
+            let (connection, mut transport) = SingleThreadTransport::new();
             let params = transport.initialize(&connection, server_capabilities)?;
             let initialize_params = serde_json::from_value(params)?;
             event_loop::process_connection(connection, self, initialize_params, Some(transport))?;

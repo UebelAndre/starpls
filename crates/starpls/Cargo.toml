@@ -30,3 +30,9 @@ walkdir = "2.5.0"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 rayon = "1.8.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.152"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasi = "0.11.0"

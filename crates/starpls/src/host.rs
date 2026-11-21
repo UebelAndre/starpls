@@ -15,10 +15,16 @@
 //!     },
 //!     "buildLanguagePath": "/data/build-language.pb",
 //!     "repoMappings": { "": { "bazel_skylib": "bazel_skylib+" } },
-//!     "workspaceTargets": ["//foo:bar"]
+//!     "workspaceTargets": ["//foo:bar"],
+//!     "requests": true
 //!   }
 //! }
 //! ```
+//!
+//! With `requests` set, anything missing above is asked for when first needed
+//! through the `starpls/bazel/repoMapping`, `starpls/bazel/buildLanguage` and
+//! `starpls/bazel/fetchRepo` requests (see `crate::extensions`); a request
+//! that depends on the answer waits for it, up to a bound.
 //!
 //! Paths are as the server sees them, so with a WebAssembly file system they
 //! are the mount points, not the host paths. `repoMappings` is keyed by the
@@ -43,6 +49,10 @@ struct HostBazelData {
     repo_mappings: HashMap<String, HashMap<String, String>>,
     #[serde(default)]
     workspace_targets: Vec<String>,
+    /// Whether the client answers `starpls/bazel/*` requests for data it did
+    /// not supply here.
+    #[serde(default)]
+    requests: bool,
 }
 
 #[derive(Deserialize)]
@@ -88,5 +98,6 @@ fn build(data: serde_json::Value) -> anyhow::Result<StaticBazelClient> {
         build_language,
         data.repo_mappings,
         data.workspace_targets,
-    ))
+    )
+    .with_client_requests(data.requests))
 }
