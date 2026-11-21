@@ -210,6 +210,7 @@ impl starpls_hir::Db for Database {
             }
         };
         defs.set_builtins(self).to(builtins);
+        defs.set_rules(self).to(rules);
     }
 
     fn get_builtin_defs(&self, dialect: &Dialect) -> BuiltinDefs {
