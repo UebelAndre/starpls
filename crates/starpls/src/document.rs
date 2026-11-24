@@ -745,7 +745,12 @@ pub(crate) fn dialect_and_api_context_for_workspace_path(
         "WORKSPACE" | "WORKSPACE.bazel" | "WORKSPACE.bzlmod" => {
             (Dialect::Bazel, Some(APIContext::Workspace))
         }
-        path if path.ends_with(".BUILD.bazel") || path.ends_with(".BUILD") => {
+        // BUILD file templates, as in `build_file = "//third_party:BUILD.zlib.bazel"`
+        // or `zlib.BUILD`; buildifier treats the same names as BUILD files.
+        path if path.ends_with(".BUILD.bazel")
+            || path.ends_with(".BUILD")
+            || (path.starts_with("BUILD.") && path.ends_with(".bazel")) =>
+        {
             (Dialect::Bazel, Some(APIContext::Build))
         }
         path if path.ends_with(".cquery") || path.ends_with(".query.bzl") => {
@@ -762,4 +767,37 @@ pub(crate) fn dialect_and_api_context_for_workspace_path(
             }
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn context_for(name: &str) -> Option<APIContext> {
+        dialect_and_api_context_for_workspace_path("/workspace", Path::new("/workspace").join(name))
+            .and_then(|(_, api_context)| api_context)
+    }
+
+    #[test]
+    fn build_file_templates_get_the_build_context() {
+        for name in [
+            "BUILD",
+            "BUILD.bazel",
+            "BUILD.zlib.bazel",
+            "zlib.BUILD",
+            "zlib.BUILD.bazel",
+            "third_party/BUILD.openssl.bazel",
+        ] {
+            assert_eq!(context_for(name), Some(APIContext::Build), "{name}");
+        }
+    }
+
+    #[test]
+    fn other_names_keep_their_context() {
+        assert_eq!(context_for("MODULE.bazel"), Some(APIContext::Module));
+        assert_eq!(context_for("WORKSPACE.bazel"), Some(APIContext::Workspace));
+        assert_eq!(context_for("defs.bzl"), Some(APIContext::Bzl));
+        assert_eq!(context_for("BUILD.md"), None);
+        assert_eq!(context_for("notes.bazel"), None);
+    }
 }
