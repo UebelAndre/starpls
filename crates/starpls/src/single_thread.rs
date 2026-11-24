@@ -231,6 +231,14 @@ pub(crate) fn canonicalize(path: &std::path::Path) -> io::Result<std::path::Path
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
+                // `a/../b` only means `b` when `a` is a directory that
+                // exists, as it does for a real `canonicalize`.
+                if !out.is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("{} is not a directory", out.display()),
+                    ));
+                }
                 out.pop();
             }
             other => out.push(other.as_os_str()),
