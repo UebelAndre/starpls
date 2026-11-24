@@ -27,12 +27,11 @@ log = "0.4.22"
 annotate-snippets = "0.11.5"
 anstream = "0.6.18"
 walkdir = "2.5.0"
+# Direct descriptor polling and directory listing, see single_thread.rs and dir.rs.
+libc = "0.2.152"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 rayon = "1.8.0"
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2.152"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 wasi = "0.11.0"

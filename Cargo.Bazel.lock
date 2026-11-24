@@ -3,7 +3,7 @@
     "protoc-gen-prost 0.2.3",
     "protoc-gen-tonic 0.3.0"
   ],
-  "checksum": "8d758fd41a61322ad2aad4591a8370c8099d534d567601d3ec77388e25e509e4",
+  "checksum": "863c1ac22ffc628a57c1b355b83e9e0afc1f5edfb1505e33bc3fab953e4428f8",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -3756,28 +3756,18 @@
       "common_attrs": {
         "crate_features": {
           "common": [
+            "default",
             "std"
           ],
           "selects": {
             "aarch64-apple-darwin": [
-              "default",
               "extra_traits"
-            ],
-            "aarch64-unknown-linux-gnu": [
-              "default"
             ],
             "wasm32-unknown-unknown": [
               "extra_traits"
             ],
             "wasm32-wasip1": [
-              "default",
               "extra_traits"
-            ],
-            "x86_64-unknown-linux-gnu": [
-              "default"
-            ],
-            "x86_64-unknown-nixos-gnu": [
-              "default"
             ]
           }
         },
@@ -6963,6 +6953,10 @@
               "target": "indexmap"
             },
             {
+              "id": "libc 0.2.152",
+              "target": "libc"
+            },
+            {
               "id": "line-index 0.1.1",
               "target": "line_index"
             },
@@ -7010,12 +7004,6 @@
               {
                 "id": "wasi 0.11.0+wasi-snapshot-preview1",
                 "target": "wasi"
-              }
-            ],
-            "cfg(unix)": [
-              {
-                "id": "libc 0.2.152",
-                "target": "libc"
               }
             ]
           }

@@ -9,6 +9,7 @@ mod config;
 mod convert;
 mod debouncer;
 mod diagnostics;
+mod dir;
 mod dispatcher;
 mod document;
 mod event_loop;

@@ -421,13 +421,10 @@ impl FileLoader for DefaultFileLoader {
                 return Ok(None);
             }
 
-            let build_file = try_opt!(fs::read_dir(&resolved_label.resolved_path)
+            // Probe the two names rather than list the directory; see `crate::dir`.
+            let build_file = try_opt!(["BUILD.bazel", "BUILD"]
                 .into_iter()
-                .flat_map(|entries| entries.into_iter())
-                .find_map(|entry| match entry.ok()?.file_name().to_str()? {
-                    file_name @ ("BUILD" | "BUILD.bazel") => Some(file_name.to_string()),
-                    _ => None,
-                }));
+                .find(|name| resolved_label.resolved_path.join(name).is_file()));
             let path = resolved_label.resolved_path.join(build_file);
 
             // If we've already interned this file, then simply return the file id.
@@ -526,13 +523,10 @@ impl FileLoader for DefaultFileLoader {
 
                 let path = crate::single_thread::canonicalize(&path)?;
                 let mut candidates = vec![];
-                let readdir = fs::read_dir(path)?;
-
-                for entry in readdir {
-                    let entry = entry?;
-                    let file_type = entry.file_type()?;
-                    if file_type.is_file() {
-                        if let Some(name) = entry.file_name().to_str() {
+                for entry in crate::dir::read_dir(&path)? {
+                    if entry.is_file {
+                        {
+                            let name = entry.name.as_str();
                             if name.ends_with(".star") || name.ends_with(".sky") {
                                 candidates.push(LoadItemCandidate {
                                     kind: LoadItemCandidateKind::File,
@@ -573,14 +567,13 @@ impl FileLoader for DefaultFileLoader {
                                 .collect(),
                         ),
                         RepoKind::Canonical | RepoKind::Apparent => Some(
-                            fs::read_dir(&self.external_output_base)?
-                                .filter_map(|entry| {
-                                    let entry = entry.ok()?;
-                                    entry.file_type().ok()?.is_dir().then(|| LoadItemCandidate {
-                                        kind: LoadItemCandidateKind::Directory,
-                                        path: entry.file_name().to_string_lossy().to_string(),
-                                        replace_trailing_slash: false,
-                                    })
+                            crate::dir::read_dir(&self.external_output_base)?
+                                .into_iter()
+                                .filter(|entry| entry.is_dir)
+                                .map(|entry| LoadItemCandidate {
+                                    kind: LoadItemCandidateKind::Directory,
+                                    path: entry.name,
+                                    replace_trailing_slash: false,
                                 })
                                 .chain(self.workspace_name.as_ref().map(|name| LoadItemCandidate {
                                     kind: LoadItemCandidateKind::Directory,
@@ -683,63 +676,43 @@ fn read_dir_packages_and_targets(
     path: impl AsRef<Path>,
     has_trailing_slash: bool,
 ) -> anyhow::Result<Vec<LoadItemCandidate>> {
-    Ok(fs::read_dir(path)?
-        .flatten()
+    Ok(crate::dir::read_dir(path.as_ref())?
+        .into_iter()
         .filter_map(|entry| {
-            entry
-                .file_type()
-                .map(|file_type| (file_type, entry.file_name()))
-                .ok()
-        })
-        .filter_map(|(file_type, file_name)| {
-            file_name.to_str().and_then(|file_name| {
-                let (kind, path, replace_trailing_slash) = if file_type.is_dir() {
-                    (
-                        LoadItemCandidateKind::Directory,
-                        file_name.to_string(),
-                        false,
-                    )
-                } else if file_name.ends_with(".bzl") {
-                    (
-                        LoadItemCandidateKind::File,
-                        format!(":{}", file_name),
-                        has_trailing_slash,
-                    )
-                } else {
-                    return None;
-                };
-                Some(LoadItemCandidate {
-                    kind,
-                    path,
-                    replace_trailing_slash,
-                })
+            let (kind, path, replace_trailing_slash) = if entry.is_dir {
+                (LoadItemCandidateKind::Directory, entry.name, false)
+            } else if entry.name.ends_with(".bzl") {
+                (
+                    LoadItemCandidateKind::File,
+                    format!(":{}", entry.name),
+                    has_trailing_slash,
+                )
+            } else {
+                return None;
+            };
+            Some(LoadItemCandidate {
+                kind,
+                path,
+                replace_trailing_slash,
             })
         })
         .collect())
 }
 
 fn read_dir_targets(path: impl AsRef<Path>) -> anyhow::Result<Vec<LoadItemCandidate>> {
-    Ok(fs::read_dir(path)?
-        .flatten()
+    Ok(crate::dir::read_dir(path.as_ref())?
+        .into_iter()
         .filter_map(|entry| {
-            entry
-                .file_type()
-                .map(|file_type| (file_type, entry.file_name()))
-                .ok()
-        })
-        .filter_map(|(file_type, file_name)| {
-            file_name.to_str().and_then(|file_name| {
-                Some(LoadItemCandidate {
-                    kind: if file_type.is_dir() {
-                        LoadItemCandidateKind::Directory
-                    } else if file_name.ends_with(".bzl") {
-                        LoadItemCandidateKind::File
-                    } else {
-                        return None;
-                    },
-                    path: file_name.to_string(),
-                    replace_trailing_slash: false,
-                })
+            Some(LoadItemCandidate {
+                kind: if entry.is_dir {
+                    LoadItemCandidateKind::Directory
+                } else if entry.name.ends_with(".bzl") {
+                    LoadItemCandidateKind::File
+                } else {
+                    return None;
+                },
+                path: entry.name,
+                replace_trailing_slash: false,
             })
         })
         .collect())

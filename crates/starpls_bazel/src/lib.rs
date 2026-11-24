@@ -145,30 +145,34 @@ pub fn decode_builtins(data: &[u8]) -> anyhow::Result<Builtins> {
 }
 
 pub fn resolve_workspace(from: impl AsRef<Path>) -> io::Result<Option<(PathBuf, PathBuf)>> {
+    const WORKSPACE_MARKERS: [&str; 4] =
+        ["WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel", "REPO.bazel"];
+    const PACKAGE_MARKERS: [&str; 2] = ["BUILD", "BUILD.bazel"];
+
+    // Probing the marker files keeps this off directory handles, which some
+    // WebAssembly hosts cannot close once the walk reaches their virtual root.
+    // The directories themselves are not stat'ed either: under Node's WASI a
+    // symbolic link that leaves a preopened directory (an external repository
+    // in Bazel's repo contents cache) fails to stat as the last path component
+    // while paths through it resolve, and a marker probe only ever goes
+    // through it.
     let mut package: Option<PathBuf> = None;
-    for ancestor in from
-        .as_ref()
-        .ancestors()
-        .filter(|ancestor| ancestor.is_dir())
-    {
-        for entry in fs::read_dir(ancestor)? {
-            match entry
-                .ok()
-                .map(|entry| entry.file_name())
-                .as_ref()
-                .and_then(|file_name| file_name.to_str())
-            {
-                Some("WORKSPACE" | "WORKSPACE.bazel" | "MODULE.bazel" | "REPO.bazel") => {
-                    return Ok(Some((
-                        ancestor.to_path_buf(),
-                        package.unwrap_or_else(|| ancestor.to_path_buf()),
-                    )));
-                }
-                Some("BUILD" | "BUILD.bazel") => {
-                    package.get_or_insert(ancestor.to_path_buf());
-                }
-                _ => {}
-            }
+    for ancestor in from.as_ref().ancestors() {
+        if WORKSPACE_MARKERS
+            .iter()
+            .any(|marker| ancestor.join(marker).is_file())
+        {
+            return Ok(Some((
+                ancestor.to_path_buf(),
+                package.unwrap_or_else(|| ancestor.to_path_buf()),
+            )));
+        }
+        if package.is_none()
+            && PACKAGE_MARKERS
+                .iter()
+                .any(|marker| ancestor.join(marker).is_file())
+        {
+            package = Some(ancestor.to_path_buf());
         }
     }
 
