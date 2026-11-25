@@ -691,6 +691,7 @@ $0
                 CompletionItem { label: "repr", kind: Function, mode: None, filter_text: None, relevance: Builtin }
                 CompletionItem { label: "reversed", kind: Function, mode: None, filter_text: None, relevance: Builtin }
                 CompletionItem { label: "rule", kind: Function, mode: None, filter_text: None, relevance: Builtin }
+                CompletionItem { label: "set", kind: Function, mode: None, filter_text: None, relevance: Builtin }
                 CompletionItem { label: "sorted", kind: Function, mode: None, filter_text: None, relevance: Builtin }
                 CompletionItem { label: "str", kind: Function, mode: None, filter_text: None, relevance: Builtin }
                 CompletionItem { label: "struct", kind: Function, mode: None, filter_text: None, relevance: Builtin }

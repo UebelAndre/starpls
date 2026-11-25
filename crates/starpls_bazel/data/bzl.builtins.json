@@ -179,6 +179,24 @@
         ],
         "return_type": "tag_class"
       }
+    },
+    {
+      "name": "set",
+      "doc": "Creates a new set containing the unique elements of the given iterable, preserving iteration order (Bazel 8 and later, `--incompatible_enable_starlark_set`). Sets are mutable and hashable-element-only; they support `in`, iteration, `len`, the operators `|`, `&`, `-`, `^` with other sets, and the methods `add`, `remove`, `discard`, `pop`, `clear`, `update`, `union`, `intersection`, `difference`, `symmetric_difference`, `issubset`, `issuperset` and `isdisjoint`.",
+      "callable": {
+        "params": [
+          {
+            "name": "elements",
+            "type": "Iterable",
+            "doc": "The elements of the new set; an iterable of hashable values. Empty when omitted.",
+            "default_value": "[]",
+            "is_mandatory": false,
+            "is_star_arg": false,
+            "is_star_star_arg": false
+          }
+        ],
+        "return_type": "set"
+      }
     }
   ]
 }
