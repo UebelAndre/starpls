@@ -945,3 +945,51 @@ fn test_crlf_unterminated_string() {
     "#]],
     );
 }
+
+#[test]
+fn test_comment_only_lines_do_not_indent() {
+    // Comment-only lines at any indentation are not INDENT or DEDENT.
+    check_lexing(
+        r#"
+def f():
+    a = 1
+# at column zero
+        # deeper than the block
+    b = 2
+    # trailing, inside the block
+"#,
+        expect![[r#"
+            Token { kind: Newline, len: 1 }
+            Token { kind: Def, len: 3 }
+            Token { kind: Whitespace, len: 1 }
+            Token { kind: Ident, len: 1 }
+            Token { kind: OpenParen, len: 1 }
+            Token { kind: CloseParen, len: 1 }
+            Token { kind: Colon, len: 1 }
+            Token { kind: Newline, len: 1 }
+            Token { kind: Indent, len: 4 }
+            Token { kind: Ident, len: 1 }
+            Token { kind: Whitespace, len: 1 }
+            Token { kind: Eq, len: 1 }
+            Token { kind: Whitespace, len: 1 }
+            Token { kind: Literal { kind: Int { base: Decimal, empty_int: false } }, len: 1 }
+            Token { kind: Newline, len: 1 }
+            Token { kind: Comment, len: 16 }
+            Token { kind: Newline, len: 1 }
+            Token { kind: Whitespace, len: 8 }
+            Token { kind: Comment, len: 23 }
+            Token { kind: Newline, len: 1 }
+            Token { kind: Whitespace, len: 4 }
+            Token { kind: Ident, len: 1 }
+            Token { kind: Whitespace, len: 1 }
+            Token { kind: Eq, len: 1 }
+            Token { kind: Whitespace, len: 1 }
+            Token { kind: Literal { kind: Int { base: Decimal, empty_int: false } }, len: 1 }
+            Token { kind: Newline, len: 1 }
+            Token { kind: Whitespace, len: 4 }
+            Token { kind: Comment, len: 28 }
+            Token { kind: Newline, len: 1 }
+            Token { kind: Dedent { consistent: true }, len: 0 }
+        "#]],
+    );
+}

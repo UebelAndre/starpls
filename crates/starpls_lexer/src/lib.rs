@@ -330,9 +330,14 @@ impl Cursor<'_> {
 
                     let last_indent = self.indents.last().cloned().unwrap_or(0);
 
-                    // If we are at an equal indentation level, or are currently at a newline or EOF, we can just
-                    // emit the whitespace that we consumed.
-                    if indent == last_indent || self.first() == '\n' || self.is_eof() {
+                    // If we are at an equal indentation level, or are currently at a newline, a
+                    // comment or EOF, we can just emit the whitespace that we consumed: blank and
+                    // comment-only lines do not take part in indentation.
+                    if indent == last_indent
+                        || self.first() == '\n'
+                        || self.first() == '#'
+                        || self.is_eof()
+                    {
                         self.state = CursorState::AfterLeadingSpaces;
                         let pos_within_token = self.reset_pos_within_token();
                         if pos_within_token == 0 {

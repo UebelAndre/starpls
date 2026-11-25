@@ -219,7 +219,7 @@ fn collect_token_lexer_errors(
                 }
             });
         } else {
-            unescape_byte_string(contents, &mut |range, res| {
+            unescape_byte_string(contents, raw, &mut |range, res| {
                 if let Err(err) = res {
                     lexer_errors.push(LexerError {
                         start: contents_start + range.start,

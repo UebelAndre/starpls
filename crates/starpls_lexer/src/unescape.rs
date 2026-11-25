@@ -69,7 +69,7 @@ where
     }
 }
 
-pub fn unescape_byte_string<F>(input: &str, callback: &mut F)
+pub fn unescape_byte_string<F>(input: &str, raw: bool, callback: &mut F)
 where
     F: FnMut(Range<usize>, Result<&[u8], EscapeError>),
 {
@@ -79,6 +79,21 @@ where
     while let Some(c) = chars.next() {
         let start = input.len() - chars.as_str().len() - c.len_utf8();
         match c {
+            // In a raw byte string (`rb"..."`) a backslash only escapes the quote.
+            '\\' if raw => {
+                let end = input.len() - chars.as_str().len();
+                match chars.clone().next() {
+                    Some('"' | '\'') => {
+                        chars.next();
+                        callback(
+                            start..input.len() - chars.as_str().len(),
+                            Ok(&input.as_bytes()[end..end + 1]),
+                        );
+                    }
+                    Some(_) => callback(start..end, Ok(b"\\")),
+                    None => callback(start..end, Err(EscapeError::LoneSlash)),
+                }
+            }
             '\\' => scan_byte_string_escape(&mut chars, start, input.len(), callback),
             _ => {
                 let end = input.len() - chars.as_str().len();
@@ -249,24 +264,27 @@ fn scan_byte_string_hexadecimal_escape(chars: &mut Chars<'_>) -> Result<u8, Esca
 }
 
 fn scan_hexadecimal_escape(chars: &mut Chars<'_>) -> Result<u32, EscapeError> {
-    // Process up to 6 hexadecimal digits.
+    // `\xHH`: exactly two hexadecimal digits, as in the spec; `"\x41A"` is
+    // `"AA"`, not an escape of three digits.
     let mut num_digits = 0;
     let mut value = 0;
 
-    while let Some(c @ ('0'..='9' | 'a'..='f' | 'A'..='F')) = chars.clone().next() {
-        chars.next();
-        let digit = c.to_digit(16).expect("invalid hexadecimal digit");
-        num_digits += 1;
-        value = value * 16 + digit;
-        if num_digits > 6 {
-            break;
+    while num_digits < 2 {
+        match chars.clone().next() {
+            Some(c @ ('0'..='9' | 'a'..='f' | 'A'..='F')) => {
+                chars.next();
+                let digit = c.to_digit(16).expect("invalid hexadecimal digit");
+                num_digits += 1;
+                value = value * 16 + digit;
+            }
+            _ => break,
         }
     }
 
-    if num_digits == 0 {
-        Err(EscapeError::EmptyHexadecimalEscape)
-    } else {
-        Ok(value)
+    match num_digits {
+        0 => Err(EscapeError::EmptyHexadecimalEscape),
+        1 => Err(EscapeError::TooShortHexadecimalEscape),
+        _ => Ok(value),
     }
 }
 
