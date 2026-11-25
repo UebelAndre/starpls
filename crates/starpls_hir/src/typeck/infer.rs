@@ -170,10 +170,18 @@ impl TyContext<'_> {
                 }
             }
             Stmt::Assign { lhs, rhs, .. } => match &module[*lhs] {
-                Expr::Index { .. } => {
+                Expr::Index { lhs: container, .. } => {
                     let lhs_ty = self.infer_expr(file, *lhs);
                     let rhs_ty = self.infer_expr(file, *rhs);
-                    if !assign_tys(self.db, &rhs_ty, &lhs_ty) {
+                    // Lists and dicts are heterogeneous in Starlark: a value type
+                    // inferred from the elements seen so far says nothing about
+                    // what may be stored next (`kwargs = {"srcs": srcs}` followed
+                    // by `kwargs["testonly"] = True` is everyday code). Only a
+                    // container with a declared type is checked.
+                    let container_declared = self.container_is_declared(file, *container);
+                    if !container_declared {
+                        self.infer_expr(file, *container);
+                    } else if !assign_tys(self.db, &rhs_ty, &lhs_ty) {
                         self.add_expr_diagnostic_error(
                             file,
                             *lhs,
@@ -1767,6 +1775,15 @@ impl TyContext<'_> {
         res
     }
 
+    /// Whether the container of an index assignment is a variable with a
+    /// declared (type-commented) type.
+    fn container_is_declared(&self, file: File, container: ExprId) -> bool {
+        match module(self.db, file).exprs.get(container) {
+            Some(Expr::Name { name }) => self.cx.declared_names.contains(&(file, name.clone())),
+            _ => false,
+        }
+    }
+
     fn assign_expr_source_ty(
         &mut self,
         file: File,
@@ -1790,6 +1807,7 @@ impl TyContext<'_> {
                 // If we have an expected type from a type comment, use that.
                 // We also emit any error if the source and expected types aren't compatible.
                 if let Some(expected_ty) = expected_ty {
+                    self.cx.declared_names.insert((file, name.clone()));
                     if !assign_tys(self.db, &source_ty, &expected_ty) {
                         self.add_expr_diagnostic_error(
                             file,

@@ -203,6 +203,49 @@ fn check_infer_with_options(input: &str, expect: Expect, options: InferenceOptio
 }
 
 #[test]
+fn test_index_assignment_into_inferred_containers() {
+    // Lists and dicts are heterogeneous: a value type inferred from the
+    // elements seen so far does not constrain later assignments. Only a
+    // declared (type-commented) container is checked.
+    check_infer(
+        r#"
+kwargs = {"srcs": ["a.cc"]}
+kwargs["testonly"] = True
+xs = [1]
+xs[0] = "one"
+d = {} # type: dict[string, string]
+d["k"] = 1
+"#,
+        expect![[r#"
+            1..7 "kwargs": dict[string, list[string]]
+            11..17 "\"srcs\"": Literal["srcs"]
+            20..26 "\"a.cc\"": Literal["a.cc"]
+            19..27 "[\"a.cc\"]": list[string]
+            10..28 "{\"srcs\": [\"a.cc\"]}": dict[string, list[string]]
+            29..35 "kwargs": dict[string, list[string]]
+            36..46 "\"testonly\"": Literal["testonly"]
+            29..47 "kwargs[\"testonly\"]": list[string]
+            50..54 "True": Literal[True]
+            55..57 "xs": list[int]
+            61..62 "1": Literal[1]
+            60..63 "[1]": list[int]
+            64..66 "xs": list[int]
+            67..68 "0": Literal[0]
+            64..69 "xs[0]": int
+            72..77 "\"one\"": Literal["one"]
+            78..79 "d": dict[string, string]
+            82..84 "{}": dict[Unknown, Unknown]
+            114..115 "d": dict[string, string]
+            116..119 "\"k\"": Literal["k"]
+            114..120 "d[\"k\"]": string
+            123..124 "1": Literal[1]
+
+            114..120 Cannot use value of type "Literal[1]" as type "string" in assignment
+        "#]],
+    );
+}
+
+#[test]
 fn test_infer_basic_exprs() {
     check_infer(
         r#"None

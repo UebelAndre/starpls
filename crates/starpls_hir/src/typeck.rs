@@ -1744,6 +1744,9 @@ pub(crate) struct InferenceContext {
     pub(crate) source_assign_done: FxHashSet<FileExprId>,
     pub(crate) flow_node_type_cache: FxHashMap<CodeFlowCacheKey, Option<Ty>>,
     pub(crate) definition_is_used: FxHashMap<InFile<Either<ExprId, StmtId>>, bool>,
+    /// Variables given a type by a type comment; only those have element
+    /// types worth checking on `x[k] = v`.
+    pub(crate) declared_names: FxHashSet<(File, Name)>,
 }
 
 pub struct CancelGuard<'a> {
